@@ -1,6 +1,4 @@
 import math
-import os
-import re
 import time
 import uuid
 import unicodedata
@@ -49,7 +47,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
 
 st.markdown(
     """
@@ -153,7 +150,6 @@ st.markdown(
         border-radius: 10px;
         font-weight: 700;
     }
-
     </style>
     """,
     unsafe_allow_html=True,
@@ -166,6 +162,7 @@ st.markdown(
 
 def retryable(fn, tries=5, base_sleep=0.7, max_sleep=8.0):
     last = None
+
     for i in range(tries):
         try:
             return fn()
@@ -173,9 +170,12 @@ def retryable(fn, tries=5, base_sleep=0.7, max_sleep=8.0):
             last = exc
             msg = str(exc)
             quota = "429" in msg or "Quota exceeded" in msg or "RESOURCE_EXHAUSTED" in msg
+
             if not quota and i >= 1:
                 raise
+
             time.sleep(min(max_sleep, base_sleep * (2 ** i)))
+
     raise last
 
 
@@ -235,6 +235,7 @@ def append_row(sheet_name: str, row: list):
 
 def update_cell_by_key(sheet_name: str, key_col: str, key_value: str, target_col: str, value):
     df = read_sheet(sheet_name)
+
     if df.empty:
         return False
 
@@ -242,6 +243,7 @@ def update_cell_by_key(sheet_name: str, key_col: str, key_value: str, target_col
         return False
 
     match = df[df[key_col].astype(str).str.strip().str.lower() == str(key_value).strip().lower()]
+
     if match.empty:
         return False
 
@@ -251,6 +253,7 @@ def update_cell_by_key(sheet_name: str, key_col: str, key_value: str, target_col
     ws = get_worksheet(sheet_name)
     retryable(lambda: ws.update_cell(row_index, col_index, value))
     st.cache_data.clear()
+
     return True
 
 
@@ -302,6 +305,7 @@ def to_float(value, default=None):
     try:
         if value is None or value == "":
             return default
+
         return float(str(value).replace(",", "."))
     except Exception:
         return default
@@ -334,6 +338,7 @@ def get_param(parametros: pd.DataFrame, unidade_id: str, parametro: str, default
         return default
 
     required = {"unidade_id", "parametro", "valor"}
+
     if not required.issubset(set(parametros.columns)):
         return default
 
@@ -360,12 +365,6 @@ def get_param(parametros: pd.DataFrame, unidade_id: str, parametro: str, default
     return default
 
 
-def safe_col(df: pd.DataFrame, col: str, default=""):
-    if col not in df.columns:
-        return default
-    return df[col]
-
-
 # ============================================================
 # DATA
 # ============================================================
@@ -390,6 +389,7 @@ def load_data():
 
 def require_columns(df: pd.DataFrame, cols: list[str], sheet_name: str):
     missing = [c for c in cols if c not in df.columns]
+
     if missing:
         st.error(f"A aba {sheet_name} está sem colunas obrigatórias: {', '.join(missing)}")
         st.stop()
@@ -482,7 +482,13 @@ def authenticate(login: str, senha: str):
     if not vinculos_out:
         return None, "Usuário sem vínculo ativo com unidade."
 
-    update_cell_by_key("USUARIOS_APP", "usuario_id", user_row["usuario_id"], "ultimo_login", datetime_str())
+    update_cell_by_key(
+        "USUARIOS_APP",
+        "usuario_id",
+        user_row["usuario_id"],
+        "ultimo_login",
+        datetime_str(),
+    )
 
     session = {
         "usuario_id": str(user_row["usuario_id"]),
@@ -496,9 +502,10 @@ def authenticate(login: str, senha: str):
 
 
 def logout():
-    for key in ["user", "logged"]:
+    for key in ["user", "logged", "page", "vinculo_label", "default_checkpoint"]:
         if key in st.session_state:
             del st.session_state[key]
+
     st.rerun()
 
 
@@ -508,6 +515,7 @@ def logout():
 
 def get_vinculo(data: dict, pessoa_id: str, unidade_id: str):
     vinculos = data["PESSOA_UNIDADE_POSICAO"]
+
     if vinculos.empty:
         return None
 
@@ -525,10 +533,12 @@ def get_vinculo(data: dict, pessoa_id: str, unidade_id: str):
 
 def get_unidade(data: dict, unidade_id: str):
     unidades = data["UNIDADES"]
+
     if unidades.empty:
         return None
 
     match = unidades[unidades["unidade_id"].astype(str).map(norm) == norm(unidade_id)]
+
     if match.empty:
         return None
 
@@ -537,10 +547,12 @@ def get_unidade(data: dict, unidade_id: str):
 
 def get_pessoa(data: dict, pessoa_id: str):
     pessoas = data["PESSOAS"]
+
     if pessoas.empty:
         return None
 
     match = pessoas[pessoas["pessoa_id"].astype(str).map(norm) == norm(pessoa_id)]
+
     if match.empty:
         return None
 
@@ -549,10 +561,12 @@ def get_pessoa(data: dict, pessoa_id: str):
 
 def get_posicao(data: dict, posicao_id: str):
     posicoes = data["POSICOES"]
+
     if posicoes.empty:
         return None
 
     match = posicoes[posicoes["posicao_id"].astype(str).map(norm) == norm(posicao_id)]
+
     if match.empty:
         return None
 
@@ -590,6 +604,7 @@ def evaluate_checkin_time(data: dict, pessoa_id: str, unidade_id: str):
         }
 
     required = ["unidade_id", "agenda_id", "data", "horario_inicio", "pessoa_id", "status"]
+
     for c in required:
         if c not in agenda.columns:
             return {
@@ -614,7 +629,6 @@ def evaluate_checkin_time(data: dict, pessoa_id: str, unidade_id: str):
 
     df = df.sort_values("horario_inicio")
     first = df.iloc[0].to_dict()
-
     horario_inicio = str(first["horario_inicio"])[:5]
 
     try:
@@ -683,8 +697,10 @@ def register_checkin(pessoa_id: str, unidade_id: str, lat: float, lon: float):
 
     if not pessoa:
         raise ValueError("Pessoa não encontrada.")
+
     if not unidade:
         raise ValueError("Unidade não encontrada.")
+
     if not vinculo:
         raise ValueError("Pessoa não possui vínculo ativo com esta unidade.")
 
@@ -705,6 +721,7 @@ def register_checkin(pessoa_id: str, unidade_id: str, lat: float, lon: float):
     parametros = data["PARAMETROS"]
 
     raio = to_float(unidade.get("raio_permitido_metros"))
+
     if raio is None:
         raio = to_float(
             get_param(parametros, unidade_id, "DISTANCIA_MAXIMA_METROS", DEFAULT_DISTANCE_METERS),
@@ -726,6 +743,7 @@ def register_checkin(pessoa_id: str, unidade_id: str, lat: float, lon: float):
 
     if status_distancia != "OK":
         alerta_gerado = "sim"
+
         create_alert(
             unidade_id=unidade_id,
             tipo_alerta="CHECKIN_FORA_DO_RAIO",
@@ -744,6 +762,7 @@ def register_checkin(pessoa_id: str, unidade_id: str, lat: float, lon: float):
 
     if horario["status_horario"] == "ATRASADO":
         alerta_gerado = "sim"
+
         create_alert(
             unidade_id=unidade_id,
             tipo_alerta="CHECKIN_ATRASADO",
@@ -802,7 +821,13 @@ def register_checkin(pessoa_id: str, unidade_id: str, lat: float, lon: float):
 # CHECKLIST STATUS
 # ============================================================
 
-def item_key(unidade_id: str, checkpoint_id: str, tipo: str, item_id: str, pessoa_id: str = "") -> Tuple[str, str, str, str, str]:
+def item_key(
+    unidade_id: str,
+    checkpoint_id: str,
+    tipo: str,
+    item_id: str,
+    pessoa_id: str = "",
+) -> Tuple[str, str, str, str, str]:
     return (
         norm(unidade_id),
         norm(checkpoint_id),
@@ -817,6 +842,7 @@ def latest_response_map(respostas: pd.DataFrame, day_iso: str) -> Dict[Tuple[str
         return {}
 
     required = {"unidade_id", "data", "checkpoint_id", "tipo_checklist", "item_id", "resposta", "timestamp"}
+
     if not required.issubset(set(respostas.columns)):
         return {}
 
@@ -830,12 +856,16 @@ def latest_response_map(respostas: pd.DataFrame, day_iso: str) -> Dict[Tuple[str
     df["ts_dt"] = pd.to_datetime(df["timestamp"], errors="coerce")
     df = df.dropna(subset=["ts_dt"]).sort_values("ts_dt")
 
+    if "pessoa_id" not in df.columns:
+        df["pessoa_id"] = ""
+
     latest = df.groupby(
         ["unidade_id", "checkpoint_id", "tipo_checklist", "item_id", "pessoa_id"],
         as_index=False,
     ).tail(1)
 
     mp = {}
+
     for _, r in latest.iterrows():
         key = item_key(
             r["unidade_id"],
@@ -870,6 +900,7 @@ def normalize_response_status(value: str) -> str:
 def effective_status(response_row: Optional[dict]) -> str:
     if not response_row:
         return "PENDENTE"
+
     return normalize_response_status(str(response_row.get("resposta", "")))
 
 
@@ -910,11 +941,13 @@ def metric_palette(ok: int, nok: int, pending: int, total: int):
 
 def get_checklist_items(data: dict, pessoa_id: str, unidade_id: str, checkpoint_id: str, tipo: str) -> pd.DataFrame:
     vinculo = get_vinculo(data, pessoa_id, unidade_id)
+
     if not vinculo:
         return pd.DataFrame()
 
     if tipo == "geral":
         df = data["CHECKLIST_GERAL_PADRAO"]
+
         if df.empty:
             return pd.DataFrame()
 
@@ -925,6 +958,7 @@ def get_checklist_items(data: dict, pessoa_id: str, unidade_id: str, checkpoint_
         ].copy()
 
     df = data["CHECKLIST_POSICAO_PADRAO"]
+
     if df.empty:
         return pd.DataFrame()
 
@@ -941,6 +975,7 @@ def get_checklist_items(data: dict, pessoa_id: str, unidade_id: str, checkpoint_
 def find_checklist_item(data: dict, item_id: str, unidade_id: str):
     for sheet in ["CHECKLIST_GERAL_PADRAO", "CHECKLIST_POSICAO_PADRAO"]:
         df = data[sheet]
+
         if df.empty or "item_padrao_id" not in df.columns:
             continue
 
@@ -973,8 +1008,10 @@ def register_checklist_response(
 
     if not pessoa:
         raise ValueError("Pessoa não encontrada.")
+
     if not unidade:
         raise ValueError("Unidade não encontrada.")
+
     if not vinculo:
         raise ValueError("Pessoa não possui vínculo ativo com esta unidade.")
 
@@ -990,7 +1027,9 @@ def register_checklist_response(
     status = "CONFORME"
     alerta = "não"
 
-    if normalize_response_status(resposta) == "NAO_OK":
+    normalized = normalize_response_status(resposta)
+
+    if normalized == "NAO_OK":
         status = "NÃO CONFORME"
         alerta = "sim"
 
@@ -1006,10 +1045,10 @@ def register_checklist_response(
             email=str(unidade.get("email_alerta") or DEFAULT_ALERT_EMAIL),
         )
 
-    elif normalize_response_status(resposta) == "NA":
+    elif normalized == "NA":
         status = "NÃO APLICÁVEL"
 
-    elif normalize_response_status(resposta) == "PENDENTE":
+    elif normalized == "PENDENTE":
         status = "PENDENTE"
 
     resposta_id = id_new("RSP")
@@ -1070,26 +1109,196 @@ def render_login():
                 st.warning("Informe login e senha.")
             else:
                 session, error = authenticate(login, senha)
+
                 if error:
                     st.error(error)
                 else:
                     st.session_state["logged"] = True
                     st.session_state["user"] = session
+                    st.session_state["page"] = "Iniciar trabalho"
                     st.rerun()
 
         st.markdown("</div>", unsafe_allow_html=True)
 
 
+# ============================================================
+# UI NAVIGATION
+# ============================================================
+
 def select_vinculo(user: dict):
     vinculos = user.get("vinculos", [])
+
     if not vinculos:
         st.error("Usuário sem vínculo ativo.")
         st.stop()
 
     labels = [f"{v['unidade_nome']} | {v['posicao_nome']}" for v in vinculos]
-    selected_label = st.sidebar.selectbox("Unidade / posição", labels)
-    selected_index = labels.index(selected_label)
-    return vinculos[selected_index]
+
+    if "vinculo_label" not in st.session_state:
+        st.session_state["vinculo_label"] = labels[0]
+
+    selected_label = st.sidebar.selectbox(
+        "Unidade / posição",
+        labels,
+        index=labels.index(st.session_state["vinculo_label"])
+        if st.session_state["vinculo_label"] in labels
+        else 0,
+    )
+
+    st.session_state["vinculo_label"] = selected_label
+
+    return vinculos[labels.index(selected_label)]
+
+
+def get_current_checkpoint():
+    now = now_sp().time()
+
+    if now.hour < 12:
+        return "CP0700", "07:00 - Abertura"
+
+    if now.hour < 18:
+        return "CP1400", "14:00 - Meio do dia"
+
+    return "CP2000", "20:00 - Fechamento"
+
+
+def user_has_checkin_today(user: dict, vinculo: dict) -> bool:
+    data = load_data()
+    checkins = data["CHECKINS"]
+
+    if checkins.empty:
+        return False
+
+    required = {"unidade_id", "data", "pessoa_id"}
+
+    if not required.issubset(set(checkins.columns)):
+        return False
+
+    today = date_str()
+
+    df = checkins[
+        (checkins["unidade_id"].astype(str).map(norm) == norm(vinculo["unidade_id"]))
+        & (checkins["pessoa_id"].astype(str).map(norm) == norm(user["pessoa_id"]))
+        & (checkins["data"].astype(str).str[:10] == today)
+    ]
+
+    return not df.empty
+
+
+# ============================================================
+# UI START WORK
+# ============================================================
+
+def render_start_work(user: dict, vinculo: dict):
+    st.markdown('<div class="liivv-card">', unsafe_allow_html=True)
+    st.markdown('<div class="main-title">Iniciar trabalho</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="subtitle">{vinculo["unidade_nome"]} | {vinculo["posicao_nome"]}</div>',
+        unsafe_allow_html=True,
+    )
+
+    checkin_ok = user_has_checkin_today(user, vinculo)
+    cp_id, cp_label = get_current_checkpoint()
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Colaboradora", user["nome"])
+    c2.metric("Unidade", vinculo["unidade_nome"])
+    c3.metric("Checkpoint sugerido", cp_label)
+
+    if checkin_ok:
+        st.success("Check-in de hoje já realizado. Você já pode preencher o checklist.")
+    else:
+        st.warning("Antes de preencher o checklist, registre seu check-in com geolocalização.")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    col1, col2 = st.columns([1, 1])
+
+    with col1:
+        st.markdown('<div class="liivv-card">', unsafe_allow_html=True)
+        st.subheader("1. Check-in")
+
+        if checkin_ok:
+            st.info("Check-in já registrado hoje.")
+        else:
+            st.caption("Use o botão abaixo para registrar sua localização na unidade.")
+
+        if st.button("Abrir check-in", type="primary", use_container_width=True):
+            st.session_state["page"] = "Check-in"
+            st.rerun()
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with col2:
+        st.markdown('<div class="liivv-card">', unsafe_allow_html=True)
+        st.subheader("2. Minhas atividades")
+
+        st.caption("Abra sua lista por posição e marque cada item como OK, Não OK ou N/A.")
+
+        if st.button("Abrir minhas atividades", type="primary", use_container_width=True):
+            st.session_state["page"] = "Checklist"
+            st.session_state["default_checkpoint"] = cp_id
+            st.rerun()
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    render_mini_dashboard(user, vinculo)
+
+
+def render_mini_dashboard(user: dict, vinculo: dict):
+    data = load_data()
+    respostas = data["RESPOSTAS_CHECKLIST"]
+
+    unidade_id = vinculo["unidade_id"]
+    pessoa_id = user["pessoa_id"]
+    today = date_str()
+    response_map = latest_response_map(respostas, today)
+
+    st.markdown('<div class="liivv-card">', unsafe_allow_html=True)
+    st.subheader("Resumo rápido do dia")
+
+    checkpoint_options = [
+        ("CP0700", "07:00"),
+        ("CP1400", "14:00"),
+        ("CP2000", "20:00"),
+    ]
+
+    total_all = 0
+    ok_all = 0
+    nok_all = 0
+    pending_all = 0
+    na_all = 0
+
+    for checkpoint_id, _ in checkpoint_options:
+        for tipo in ["geral", "posicao"]:
+            df_items = get_checklist_items(data, pessoa_id, unidade_id, checkpoint_id, tipo)
+
+            for _, item in df_items.iterrows():
+                item_id = str(item.get("item_padrao_id", ""))
+                key = item_key(unidade_id, checkpoint_id, tipo, item_id, pessoa_id)
+                status = effective_status(response_map.get(key))
+
+                total_all += 1
+
+                if status == "OK":
+                    ok_all += 1
+                elif status == "NAO_OK":
+                    nok_all += 1
+                elif status == "NA":
+                    na_all += 1
+                else:
+                    pending_all += 1
+
+    pct = int(round((ok_all / total_all) * 100, 0)) if total_all else 0
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Progresso", f"{pct}%")
+    c2.metric("OK", ok_all)
+    c3.metric("Não OK", nok_all)
+    c4.metric("N/A", na_all)
+    c5.metric("Pendentes", pending_all)
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ============================================================
@@ -1098,16 +1307,19 @@ def select_vinculo(user: dict):
 
 def render_checkin(user: dict, vinculo: dict):
     st.markdown('<div class="liivv-card">', unsafe_allow_html=True)
-    st.subheader("Check-in")
+    st.subheader("Check-in com geolocalização")
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Pessoa", user["nome"])
     c2.metric("Unidade", vinculo["unidade_nome"])
     c3.metric("Posição", vinculo["posicao_nome"])
 
+    if user_has_checkin_today(user, vinculo):
+        st.success("Você já realizou check-in hoje nesta unidade.")
+
     st.caption(
-        "O navegador precisa permitir acesso à localização. "
-        "Em prédios corporativos, o GPS pode oscilar. Ajuste o raio na aba UNIDADES se necessário."
+        "Permita o acesso à localização no navegador. "
+        "Em prédios corporativos, o GPS pode oscilar. O raio permitido é configurado na aba UNIDADES."
     )
 
     location = None
@@ -1125,10 +1337,13 @@ def render_checkin(user: dict, vinculo: dict):
         default_lat = location["coords"].get("latitude")
         default_lon = location["coords"].get("longitude")
 
-    with st.expander("Localização capturada", expanded=False):
+    with st.expander("Ver localização capturada", expanded=False):
         st.write(location if location else "Localização ainda não capturada ou bloqueada.")
 
-    manual = st.checkbox("Informar latitude e longitude manualmente", value=not bool(default_lat and default_lon))
+    manual = st.checkbox(
+        "Informar latitude e longitude manualmente",
+        value=not bool(default_lat and default_lon),
+    )
 
     if manual:
         lat = st.number_input("Latitude atual", value=0.0, format="%.8f")
@@ -1158,8 +1373,8 @@ def render_checkin(user: dict, vinculo: dict):
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Distância", f"{result['distancia_metros']:.1f} m")
                 c2.metric("Raio permitido", f"{result['raio_permitido_metros']} m")
-                c3.metric("Distância", result["status_distancia"])
-                c4.metric("Horário", result["status_horario"])
+                c3.metric("Status distância", result["status_distancia"])
+                c4.metric("Status horário", result["status_horario"])
                 st.caption(result.get("mensagem", ""))
 
         except Exception as exc:
@@ -1183,7 +1398,6 @@ def render_dashboard(user: dict, vinculo: dict):
 
     st.markdown('<div class="liivv-card">', unsafe_allow_html=True)
     st.subheader("Dashboard operacional")
-
     st.info(f"Resumo do dia: {weekday_pt(now_sp().date())} | {today}")
 
     checkpoint_options = [
@@ -1238,6 +1452,7 @@ def render_dashboard(user: dict, vinculo: dict):
 
     for i, row in enumerate(rows):
         bg = metric_palette(row["ok"], row["nok"], row["pending"], row["total"])
+
         with cols[i % 3]:
             st.markdown(
                 f"""
@@ -1261,7 +1476,7 @@ def render_dashboard(user: dict, vinculo: dict):
 
 def render_checklist(user: dict, vinculo: dict):
     st.markdown('<div class="liivv-card">', unsafe_allow_html=True)
-    st.subheader("Checklist")
+    st.subheader("Minhas atividades")
 
     unidade_id = vinculo["unidade_id"]
     pessoa_id = user["pessoa_id"]
@@ -1271,20 +1486,33 @@ def render_checklist(user: dict, vinculo: dict):
     respostas = data["RESPOSTAS_CHECKLIST"]
     response_map = latest_response_map(respostas, today)
 
-    st.info(f"Checklist do dia: {weekday_pt(now_sp().date())} | {today}")
+    st.info(f"Atividades do dia: {weekday_pt(now_sp().date())} | {today}")
+
+    current_cp, _ = get_current_checkpoint()
+
+    checkpoint_values = {
+        "CP0700 | 07:00 - Abertura": "CP0700",
+        "CP1400 | 14:00 - Meio do dia": "CP1400",
+        "CP2000 | 20:00 - Fechamento": "CP2000",
+    }
+
+    labels = list(checkpoint_values.keys())
+
+    default_checkpoint = st.session_state.get("default_checkpoint", current_cp)
+    default_label = next(
+        (label for label, value in checkpoint_values.items() if value == default_checkpoint),
+        labels[0],
+    )
 
     c1, c2 = st.columns([1, 1])
 
     with c1:
         checkpoint_label = st.selectbox(
-            "Checkpoint",
-            [
-                "CP0700 | 07:00 - Abertura",
-                "CP1400 | 14:00 - Meio do dia",
-                "CP2000 | 20:00 - Fechamento",
-            ],
+            "Escolha o checkpoint",
+            labels,
+            index=labels.index(default_label),
         )
-        checkpoint_id = checkpoint_label.split("|")[0].strip()
+        checkpoint_id = checkpoint_values[checkpoint_label]
 
     with c2:
         tipo_label = st.selectbox(
@@ -1293,21 +1521,47 @@ def render_checklist(user: dict, vinculo: dict):
         )
         tipo = "posicao" if tipo_label == "Por posição" else "geral"
 
-    if st.button("Atualizar lista", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
-
     checklist = get_checklist_items(data, pessoa_id, unidade_id, checkpoint_id, tipo)
 
     if checklist.empty:
-        st.info("Nenhum item encontrado para esta combinação.")
+        st.info("Nenhuma atividade encontrada para esta combinação.")
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    st.caption(
-        "Tudo começa pendente. Use OK, Não OK, N/A ou Desmarcar. "
-        "Observação e evidência são opcionais, mas recomendadas para Não OK."
-    )
+    total = len(checklist)
+    ok = 0
+    nok = 0
+    na = 0
+    pending = 0
+
+    for _, item in checklist.iterrows():
+        item_id = str(item.get("item_padrao_id", ""))
+        key = item_key(unidade_id, checkpoint_id, tipo, item_id, pessoa_id)
+        status = effective_status(response_map.get(key))
+
+        if status == "OK":
+            ok += 1
+        elif status == "NAO_OK":
+            nok += 1
+        elif status == "NA":
+            na += 1
+        else:
+            pending += 1
+
+    pct = int(round((ok / total) * 100, 0)) if total else 0
+
+    p1, p2, p3, p4, p5 = st.columns(5)
+    p1.metric("Progresso", f"{pct}%")
+    p2.metric("OK", ok)
+    p3.metric("Não OK", nok)
+    p4.metric("N/A", na)
+    p5.metric("Pendentes", pending)
+
+    if st.button("Atualizar atividades", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+
+    st.caption("Marque cada atividade. Use observação quando houver algo fora do padrão.")
 
     for _, item in checklist.iterrows():
         item_id = str(item.get("item_padrao_id", ""))
@@ -1342,87 +1596,71 @@ def render_checklist(user: dict, vinculo: dict):
             unsafe_allow_html=True,
         )
 
-        with st.expander("Registrar detalhe / evidência", expanded=False):
-            observacao = st.text_area("Observação", key=obs_key)
-            evidencia_url = st.text_input("URL de evidência", key=evid_key)
+        with st.expander("Observação / evidência", expanded=False):
+            st.text_area("Observação", key=obs_key)
+            st.text_input("URL de evidência", key=evid_key)
 
         b1, b2, b3, b4 = st.columns(4)
 
         with b1:
             if st.button("OK", key=f"ok_{key}", use_container_width=True):
-                try:
-                    register_checklist_response(
-                        unidade_id=unidade_id,
-                        pessoa_id=pessoa_id,
-                        checkpoint_id=checkpoint_id,
-                        tipo_checklist=tipo,
-                        item_id=item_id,
-                        resposta="OK",
-                        observacao=st.session_state.get(obs_key, ""),
-                        evidencia_url=st.session_state.get(evid_key, ""),
-                    )
-                    st.success("Registrado como OK.")
-                    st.cache_data.clear()
-                    st.rerun()
-                except Exception as exc:
-                    st.error(str(exc))
+                register_checklist_response(
+                    unidade_id=unidade_id,
+                    pessoa_id=pessoa_id,
+                    checkpoint_id=checkpoint_id,
+                    tipo_checklist=tipo,
+                    item_id=item_id,
+                    resposta="OK",
+                    observacao=st.session_state.get(obs_key, ""),
+                    evidencia_url=st.session_state.get(evid_key, ""),
+                )
+                st.cache_data.clear()
+                st.rerun()
 
         with b2:
             if st.button("Não OK", key=f"nok_{key}", use_container_width=True):
-                try:
-                    register_checklist_response(
-                        unidade_id=unidade_id,
-                        pessoa_id=pessoa_id,
-                        checkpoint_id=checkpoint_id,
-                        tipo_checklist=tipo,
-                        item_id=item_id,
-                        resposta="NÃO OK",
-                        observacao=st.session_state.get(obs_key, ""),
-                        evidencia_url=st.session_state.get(evid_key, ""),
-                    )
-                    st.warning("Registrado como Não OK.")
-                    st.cache_data.clear()
-                    st.rerun()
-                except Exception as exc:
-                    st.error(str(exc))
+                register_checklist_response(
+                    unidade_id=unidade_id,
+                    pessoa_id=pessoa_id,
+                    checkpoint_id=checkpoint_id,
+                    tipo_checklist=tipo,
+                    item_id=item_id,
+                    resposta="NÃO OK",
+                    observacao=st.session_state.get(obs_key, ""),
+                    evidencia_url=st.session_state.get(evid_key, ""),
+                )
+                st.cache_data.clear()
+                st.rerun()
 
         with b3:
             if st.button("N/A", key=f"na_{key}", use_container_width=True):
-                try:
-                    register_checklist_response(
-                        unidade_id=unidade_id,
-                        pessoa_id=pessoa_id,
-                        checkpoint_id=checkpoint_id,
-                        tipo_checklist=tipo,
-                        item_id=item_id,
-                        resposta="NÃO APLICÁVEL",
-                        observacao=st.session_state.get(obs_key, ""),
-                        evidencia_url=st.session_state.get(evid_key, ""),
-                    )
-                    st.info("Registrado como não aplicável.")
-                    st.cache_data.clear()
-                    st.rerun()
-                except Exception as exc:
-                    st.error(str(exc))
+                register_checklist_response(
+                    unidade_id=unidade_id,
+                    pessoa_id=pessoa_id,
+                    checkpoint_id=checkpoint_id,
+                    tipo_checklist=tipo,
+                    item_id=item_id,
+                    resposta="NÃO APLICÁVEL",
+                    observacao=st.session_state.get(obs_key, ""),
+                    evidencia_url=st.session_state.get(evid_key, ""),
+                )
+                st.cache_data.clear()
+                st.rerun()
 
         with b4:
             if st.button("Desmarcar", key=f"rst_{key}", use_container_width=True):
-                try:
-                    register_checklist_response(
-                        unidade_id=unidade_id,
-                        pessoa_id=pessoa_id,
-                        checkpoint_id=checkpoint_id,
-                        tipo_checklist=tipo,
-                        item_id=item_id,
-                        resposta="PENDENTE",
-                        observacao="Desmarcado pelo usuário",
-                        evidencia_url="",
-                    )
-                    st.info("Item desmarcado.")
-                    st.cache_data.clear()
-                    st.rerun()
-                except Exception as exc:
-                    st.error(str(exc))
+                register_checklist_response(
+                    unidade_id=unidade_id,
+                    pessoa_id=pessoa_id,
+                    checkpoint_id=checkpoint_id,
+                    tipo_checklist=tipo,
+                    item_id=item_id,
+                    resposta="PENDENTE",
+                    observacao="Desmarcado pelo usuário",
+                    evidencia_url="",
+                )
+                st.cache_data.clear()
+                st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1448,33 +1686,40 @@ def render_admin(user: dict, vinculo: dict):
 
     with tab_alertas:
         df = data["ALERTAS"]
+
         if df.empty:
             st.info("Nenhum alerta registrado.")
         else:
             if "unidade_id" in df.columns:
                 df = df[df["unidade_id"].astype(str).map(norm) == norm(unidade_id)]
+
             st.dataframe(df.sort_values("timestamp", ascending=False), use_container_width=True)
 
     with tab_checkins:
         df = data["CHECKINS"]
+
         if df.empty:
             st.info("Nenhum check-in registrado.")
         else:
             if "unidade_id" in df.columns:
                 df = df[df["unidade_id"].astype(str).map(norm) == norm(unidade_id)]
+
             st.dataframe(df.sort_values("timestamp", ascending=False), use_container_width=True)
 
     with tab_respostas:
         df = data["RESPOSTAS_CHECKLIST"]
+
         if df.empty:
             st.info("Nenhuma resposta registrada.")
         else:
             if "unidade_id" in df.columns:
                 df = df[df["unidade_id"].astype(str).map(norm) == norm(unidade_id)]
+
             st.dataframe(df.sort_values("timestamp", ascending=False), use_container_width=True)
 
     with tab_unidades:
         df = data["UNIDADES"]
+
         if df.empty:
             st.info("Nenhuma unidade cadastrada.")
         else:
@@ -1497,29 +1742,36 @@ def render_app():
     vinculo = select_vinculo(user)
 
     st.sidebar.divider()
+
+    pages = ["Iniciar trabalho", "Checklist", "Check-in", "Dashboard", "Admin"]
+
+    if "page" not in st.session_state:
+        st.session_state["page"] = "Iniciar trabalho"
+
+    page = st.sidebar.radio(
+        "Menu",
+        pages,
+        index=pages.index(st.session_state["page"])
+        if st.session_state["page"] in pages
+        else 0,
+    )
+
+    st.session_state["page"] = page
+
+    st.sidebar.divider()
+
     if st.sidebar.button("Sair", use_container_width=True):
         logout()
 
-    st.markdown('<div class="main-title">LIIVV Checklist</div>', unsafe_allow_html=True)
-    st.markdown(
-        f'<div class="subtitle">{vinculo["unidade_nome"]} | {vinculo["posicao_nome"]}</div>',
-        unsafe_allow_html=True,
-    )
-
-    tab_dash, tab_checklist, tab_checkin, tab_admin = st.tabs(
-        ["Dashboard", "Checklist", "Check-in", "Admin"]
-    )
-
-    with tab_dash:
-        render_dashboard(user, vinculo)
-
-    with tab_checklist:
+    if page == "Iniciar trabalho":
+        render_start_work(user, vinculo)
+    elif page == "Checklist":
         render_checklist(user, vinculo)
-
-    with tab_checkin:
+    elif page == "Check-in":
         render_checkin(user, vinculo)
-
-    with tab_admin:
+    elif page == "Dashboard":
+        render_dashboard(user, vinculo)
+    elif page == "Admin":
         render_admin(user, vinculo)
 
 
