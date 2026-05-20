@@ -1,12 +1,18 @@
 import math
+import os
+import re
+import time
 import uuid
-from datetime import datetime, timedelta
+import unicodedata
+from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
+from typing import Dict, Optional, Tuple
 
 import gspread
 import pandas as pd
 import streamlit as st
 from google.oauth2.service_account import Credentials
+from gspread.exceptions import APIError
 
 try:
     from streamlit_js_eval import get_geolocation
@@ -19,7 +25,11 @@ except Exception:
 # ============================================================
 
 TZ = ZoneInfo("America/Sao_Paulo")
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
 
 SPREADSHEET_ID = st.secrets.get("SPREADSHEET_ID", "")
 APP_TITLE = st.secrets.get("APP_TITLE", "LIIVV Checklist")
@@ -36,9 +46,10 @@ DEFAULT_ALERT_EMAIL = "operacao@liivv.com.br"
 st.set_page_config(
     page_title=APP_TITLE,
     page_icon="✅",
-    layout="centered",
-    initial_sidebar_state="collapsed",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
+
 
 st.markdown(
     """
@@ -46,32 +57,103 @@ st.markdown(
     .stApp {
         background: #EFE7DD;
     }
+
     [data-testid="stHeader"] {
-        background: rgba(239, 231, 221, 0.92);
+        background: rgba(239, 231, 221, 0.95);
     }
+
+    .main-title {
+        color: #0E2A47;
+        font-size: 30px;
+        font-weight: 900;
+        margin-bottom: 2px;
+    }
+
+    .subtitle {
+        color: #6B7785;
+        font-size: 14px;
+        margin-bottom: 20px;
+    }
+
     .liivv-card {
         background: #ffffff;
         border: 1px solid #D7CFC3;
         border-radius: 18px;
-        padding: 22px;
+        padding: 18px;
         box-shadow: 0 2px 12px rgba(0,0,0,0.06);
         margin-bottom: 16px;
     }
-    .liivv-title {
-        color: #0E2A47;
-        font-size: 28px;
-        font-weight: 800;
-        margin-bottom: 4px;
+
+    .metric-card {
+        border-radius: 16px;
+        padding: 16px;
+        color: white;
+        min-height: 110px;
+        margin-bottom: 10px;
     }
-    .liivv-subtitle {
-        color: #6B7785;
+
+    .metric-title {
         font-size: 14px;
-        margin-bottom: 18px;
+        opacity: 0.95;
+        font-weight: 700;
     }
+
+    .metric-value {
+        font-size: 30px;
+        font-weight: 900;
+        margin-top: 8px;
+    }
+
+    .metric-sub {
+        font-size: 12px;
+        opacity: 0.92;
+        margin-top: 6px;
+    }
+
+    .task-card {
+        border-radius: 16px;
+        padding: 14px;
+        margin: 10px 0;
+        border: 1px solid rgba(0,0,0,0.08);
+    }
+
+    .task-title {
+        font-size: 15px;
+        font-weight: 900;
+        color: #111827;
+    }
+
+    .task-detail {
+        font-size: 13px;
+        color: #374151;
+        margin-top: 6px;
+    }
+
+    .task-meta {
+        font-size: 12px;
+        color: #4B5563;
+        margin-top: 6px;
+    }
+
+    .pill {
+        display: inline-block;
+        padding: 4px 9px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 800;
+        margin-top: 8px;
+    }
+
     .small-muted {
         color: #6B7785;
         font-size: 13px;
     }
+
+    div[data-testid="stButton"] > button {
+        border-radius: 10px;
+        font-weight: 700;
+    }
+
     </style>
     """,
     unsafe_allow_html=True,
@@ -82,9 +164,30 @@ st.markdown(
 # GOOGLE SHEETS
 # ============================================================
 
+def retryable(fn, tries=5, base_sleep=0.7, max_sleep=8.0):
+    last = None
+    for i in range(tries):
+        try:
+            return fn()
+        except APIError as exc:
+            last = exc
+            msg = str(exc)
+            quota = "429" in msg or "Quota exceeded" in msg or "RESOURCE_EXHAUSTED" in msg
+            if not quota and i >= 1:
+                raise
+            time.sleep(min(max_sleep, base_sleep * (2 ** i)))
+    raise last
+
+
 @st.cache_resource
 def get_client():
-    creds_dict = dict(st.secrets["google_service_account"])
+    if "google_service_account" in st.secrets:
+        creds_dict = dict(st.secrets["google_service_account"])
+    elif "gcp_service_account" in st.secrets:
+        creds_dict = dict(st.secrets["gcp_service_account"])
+    else:
+        raise RuntimeError("Secrets precisa ter [google_service_account] ou [gcp_service_account].")
+
     credentials = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     return gspread.authorize(credentials)
 
@@ -92,11 +195,11 @@ def get_client():
 @st.cache_resource
 def get_spreadsheet():
     if not SPREADSHEET_ID:
-        st.error("SPREADSHEET_ID não configurado nos secrets.")
+        st.error("SPREADSHEET_ID não configurado nos Secrets.")
         st.stop()
 
     try:
-        return get_client().open_by_key(SPREADSHEET_ID)
+        return retryable(lambda: get_client().open_by_key(SPREADSHEET_ID))
     except Exception as exc:
         st.error(
             "Não foi possível abrir a planilha. "
@@ -111,22 +214,22 @@ def read_sheet(sheet_name: str) -> pd.DataFrame:
     sh = get_spreadsheet()
 
     try:
-        ws = sh.worksheet(sheet_name)
+        ws = retryable(lambda: sh.worksheet(sheet_name))
     except Exception:
         return pd.DataFrame()
 
-    rows = ws.get_all_records()
-    return pd.DataFrame(rows)
+    values = retryable(lambda: ws.get_all_records())
+    return pd.DataFrame(values)
 
 
 def get_worksheet(sheet_name: str):
     sh = get_spreadsheet()
-    return sh.worksheet(sheet_name)
+    return retryable(lambda: sh.worksheet(sheet_name))
 
 
 def append_row(sheet_name: str, row: list):
     ws = get_worksheet(sheet_name)
-    ws.append_row(row, value_input_option="USER_ENTERED")
+    retryable(lambda: ws.append_row(row, value_input_option="USER_ENTERED"))
     st.cache_data.clear()
 
 
@@ -146,7 +249,7 @@ def update_cell_by_key(sheet_name: str, key_col: str, key_value: str, target_col
     col_index = list(df.columns).index(target_col) + 1
 
     ws = get_worksheet(sheet_name)
-    ws.update_cell(row_index, col_index, value)
+    retryable(lambda: ws.update_cell(row_index, col_index, value))
     st.cache_data.clear()
     return True
 
@@ -159,23 +262,36 @@ def now_sp() -> datetime:
     return datetime.now(TZ)
 
 
-def date_str(dt: datetime | None = None) -> str:
+def date_str(dt: Optional[datetime] = None) -> str:
     dt = dt or now_sp()
     return dt.strftime("%Y-%m-%d")
 
 
-def time_str(dt: datetime | None = None) -> str:
+def time_str(dt: Optional[datetime] = None) -> str:
     dt = dt or now_sp()
     return dt.strftime("%H:%M:%S")
 
 
-def datetime_str(dt: datetime | None = None) -> str:
+def datetime_str(dt: Optional[datetime] = None) -> str:
     dt = dt or now_sp()
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def weekday_pt(d: date) -> str:
+    names = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
+    return names[d.weekday()]
+
+
+def strip_accents(text: str) -> str:
+    text = str(text or "").strip()
+    return "".join(
+        ch for ch in unicodedata.normalize("NFD", text)
+        if unicodedata.category(ch) != "Mn"
+    )
+
+
 def norm(value) -> str:
-    return str(value or "").strip().lower()
+    return strip_accents(str(value or "")).strip().lower()
 
 
 def id_new(prefix: str) -> str:
@@ -209,6 +325,10 @@ def haversine_meters(lat1, lon1, lat2, lon2) -> float:
     return radius * c
 
 
+def unidade_aplica(valor_unidade: str, unidade_id: str) -> bool:
+    return norm(valor_unidade) in {"todas", norm(unidade_id)}
+
+
 def get_param(parametros: pd.DataFrame, unidade_id: str, parametro: str, default):
     if parametros.empty:
         return default
@@ -240,12 +360,14 @@ def get_param(parametros: pd.DataFrame, unidade_id: str, parametro: str, default
     return default
 
 
-def unidade_aplica(valor_unidade: str, unidade_id: str) -> bool:
-    return norm(valor_unidade) in {"todas", norm(unidade_id)}
+def safe_col(df: pd.DataFrame, col: str, default=""):
+    if col not in df.columns:
+        return default
+    return df[col]
 
 
 # ============================================================
-# DATA LOAD
+# DATA
 # ============================================================
 
 def load_data():
@@ -339,7 +461,7 @@ def authenticate(login: str, senha: str):
         if unidade.empty:
             continue
 
-        if not unidade.empty and norm(unidade.iloc[0].get("ativa", "")) != "sim":
+        if norm(unidade.iloc[0].get("ativa", "")) != "sim":
             continue
 
         if not posicao.empty and norm(posicao.iloc[0].get("ativa", "")) != "sim":
@@ -381,7 +503,7 @@ def logout():
 
 
 # ============================================================
-# BUSINESS LOGIC
+# BUSINESS LOOKUPS
 # ============================================================
 
 def get_vinculo(data: dict, pessoa_id: str, unidade_id: str):
@@ -436,6 +558,10 @@ def get_posicao(data: dict, posicao_id: str):
 
     return match.iloc[0].to_dict()
 
+
+# ============================================================
+# CHECK-IN
+# ============================================================
 
 def evaluate_checkin_time(data: dict, pessoa_id: str, unidade_id: str):
     agenda = data["AGENDA_ATENDIMENTOS"]
@@ -672,7 +798,117 @@ def register_checkin(pessoa_id: str, unidade_id: str, lat: float, lon: float):
     }
 
 
-def get_checklist(data: dict, pessoa_id: str, unidade_id: str, checkpoint_id: str, tipo: str) -> pd.DataFrame:
+# ============================================================
+# CHECKLIST STATUS
+# ============================================================
+
+def item_key(unidade_id: str, checkpoint_id: str, tipo: str, item_id: str, pessoa_id: str = "") -> Tuple[str, str, str, str, str]:
+    return (
+        norm(unidade_id),
+        norm(checkpoint_id),
+        norm(tipo),
+        norm(item_id),
+        norm(pessoa_id),
+    )
+
+
+def latest_response_map(respostas: pd.DataFrame, day_iso: str) -> Dict[Tuple[str, str, str, str, str], dict]:
+    if respostas.empty:
+        return {}
+
+    required = {"unidade_id", "data", "checkpoint_id", "tipo_checklist", "item_id", "resposta", "timestamp"}
+    if not required.issubset(set(respostas.columns)):
+        return {}
+
+    df = respostas.copy()
+    df["data"] = df["data"].astype(str).str[:10]
+    df = df[df["data"] == day_iso].copy()
+
+    if df.empty:
+        return {}
+
+    df["ts_dt"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df = df.dropna(subset=["ts_dt"]).sort_values("ts_dt")
+
+    latest = df.groupby(
+        ["unidade_id", "checkpoint_id", "tipo_checklist", "item_id", "pessoa_id"],
+        as_index=False,
+    ).tail(1)
+
+    mp = {}
+    for _, r in latest.iterrows():
+        key = item_key(
+            r["unidade_id"],
+            r["checkpoint_id"],
+            r["tipo_checklist"],
+            r["item_id"],
+            r.get("pessoa_id", ""),
+        )
+        mp[key] = r.to_dict()
+
+    return mp
+
+
+def normalize_response_status(value: str) -> str:
+    s = norm(value).replace(" ", "_")
+
+    if s in {"ok", "conforme", "feito", "concluido"}:
+        return "OK"
+
+    if s in {"nao_ok", "não_ok", "n_ok", "nok", "nao_conforme", "não_conforme"}:
+        return "NAO_OK"
+
+    if s in {"nao_aplicavel", "não_aplicavel", "n_a", "na"}:
+        return "NA"
+
+    if s in {"pendente", "desmarcar", ""}:
+        return "PENDENTE"
+
+    return "PENDENTE"
+
+
+def effective_status(response_row: Optional[dict]) -> str:
+    if not response_row:
+        return "PENDENTE"
+    return normalize_response_status(str(response_row.get("resposta", "")))
+
+
+def card_palette(status: str) -> Tuple[str, str, str]:
+    s = (status or "").upper()
+
+    if s == "OK":
+        return "#d1fae5", "#065f46", "Concluído"
+
+    if s == "NAO_OK":
+        return "#fee2e2", "#991b1b", "Não OK"
+
+    if s == "NA":
+        return "#e0e7ff", "#3730a3", "N/A"
+
+    return "#f3f4f6", "#374151", "Pendente"
+
+
+def metric_palette(ok: int, nok: int, pending: int, total: int):
+    if total == 0:
+        return "#1f2937"
+
+    if nok > 0:
+        return "#7a1f2b"
+
+    if pending > 0 and ok > 0:
+        return "#8b6b12"
+
+    if pending > 0 and ok == 0:
+        return "#1f2937"
+
+    return "#0b6a5a"
+
+
+# ============================================================
+# CHECKLIST DATA
+# ============================================================
+
+def get_checklist_items(data: dict, pessoa_id: str, unidade_id: str, checkpoint_id: str, tipo: str) -> pd.DataFrame:
     vinculo = get_vinculo(data, pessoa_id, unidade_id)
     if not vinculo:
         return pd.DataFrame()
@@ -726,8 +962,8 @@ def register_checklist_response(
     tipo_checklist: str,
     item_id: str,
     resposta: str,
-    observacao: str,
-    evidencia_url: str,
+    observacao: str = "",
+    evidencia_url: str = "",
 ):
     data = load_data()
 
@@ -754,7 +990,7 @@ def register_checklist_response(
     status = "CONFORME"
     alerta = "não"
 
-    if norm(resposta) in {"não ok", "nao ok"}:
+    if normalize_response_status(resposta) == "NAO_OK":
         status = "NÃO CONFORME"
         alerta = "sim"
 
@@ -769,6 +1005,12 @@ def register_checklist_response(
             mensagem=f"Item não conforme no checklist. Item: {item_nome}. Observação: {observacao or ''}",
             email=str(unidade.get("email_alerta") or DEFAULT_ALERT_EMAIL),
         )
+
+    elif normalize_response_status(resposta) == "NA":
+        status = "NÃO APLICÁVEL"
+
+    elif normalize_response_status(resposta) == "PENDENTE":
+        status = "PENDENTE"
 
     resposta_id = id_new("RSP")
 
@@ -804,35 +1046,38 @@ def register_checklist_response(
 
 
 # ============================================================
-# UI
+# UI LOGIN
 # ============================================================
 
 def render_login():
-    st.markdown('<div class="liivv-card">', unsafe_allow_html=True)
-    st.markdown('<div class="liivv-title">LIIVV Checklist</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="liivv-subtitle">Acesse para registrar check-in e checklist operacional.</div>',
-        unsafe_allow_html=True,
-    )
+    left, mid, right = st.columns([1, 1.2, 1])
 
-    with st.form("login_form"):
-        login = st.text_input("Login")
-        senha = st.text_input("Senha", type="password")
-        submitted = st.form_submit_button("Entrar", use_container_width=True)
+    with mid:
+        st.markdown('<div class="liivv-card">', unsafe_allow_html=True)
+        st.markdown('<div class="main-title">LIIVV Checklist</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="subtitle">Acesso operacional para check-in e checklist por unidade.</div>',
+            unsafe_allow_html=True,
+        )
 
-    if submitted:
-        if not login or not senha:
-            st.warning("Informe login e senha.")
-        else:
-            session, error = authenticate(login, senha)
-            if error:
-                st.error(error)
+        with st.form("login_form"):
+            login = st.text_input("Login")
+            senha = st.text_input("Senha", type="password")
+            submitted = st.form_submit_button("Entrar", use_container_width=True)
+
+        if submitted:
+            if not login or not senha:
+                st.warning("Informe login e senha.")
             else:
-                st.session_state["logged"] = True
-                st.session_state["user"] = session
-                st.rerun()
+                session, error = authenticate(login, senha)
+                if error:
+                    st.error(error)
+                else:
+                    st.session_state["logged"] = True
+                    st.session_state["user"] = session
+                    st.rerun()
 
-    st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 def select_vinculo(user: dict):
@@ -842,18 +1087,23 @@ def select_vinculo(user: dict):
         st.stop()
 
     labels = [f"{v['unidade_nome']} | {v['posicao_nome']}" for v in vinculos]
-    selected_label = st.selectbox("Unidade / posição", labels)
+    selected_label = st.sidebar.selectbox("Unidade / posição", labels)
     selected_index = labels.index(selected_label)
     return vinculos[selected_index]
 
 
+# ============================================================
+# UI CHECK-IN
+# ============================================================
+
 def render_checkin(user: dict, vinculo: dict):
     st.markdown('<div class="liivv-card">', unsafe_allow_html=True)
-    st.subheader("Check-in com geolocalização")
+    st.subheader("Check-in")
 
-    st.write(f"**Pessoa:** {user['nome']}")
-    st.write(f"**Unidade:** {vinculo['unidade_nome']}")
-    st.write(f"**Posição:** {vinculo['posicao_nome']}")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Pessoa", user["nome"])
+    c2.metric("Unidade", vinculo["unidade_nome"])
+    c3.metric("Posição", vinculo["posicao_nome"])
 
     st.caption(
         "O navegador precisa permitir acesso à localização. "
@@ -888,7 +1138,7 @@ def render_checkin(user: dict, vinculo: dict):
         lon = default_lon
         st.success(f"Localização capturada: {lat}, {lon}")
 
-    if st.button("Registrar check-in", use_container_width=True):
+    if st.button("Registrar check-in", type="primary", use_container_width=True):
         try:
             if not lat or not lon:
                 st.warning("Latitude e longitude não disponíveis.")
@@ -905,10 +1155,11 @@ def render_checkin(user: dict, vinculo: dict):
                 else:
                     st.success("Check-in registrado com sucesso.")
 
-                st.write(f"**Distância:** {result['distancia_metros']:.1f} m")
-                st.write(f"**Raio permitido:** {result['raio_permitido_metros']} m")
-                st.write(f"**Status distância:** {result['status_distancia']}")
-                st.write(f"**Status horário:** {result['status_horario']}")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Distância", f"{result['distancia_metros']:.1f} m")
+                c2.metric("Raio permitido", f"{result['raio_permitido_metros']} m")
+                c3.metric("Distância", result["status_distancia"])
+                c4.metric("Horário", result["status_horario"])
                 st.caption(result.get("mensagem", ""))
 
         except Exception as exc:
@@ -917,163 +1168,360 @@ def render_checkin(user: dict, vinculo: dict):
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+# ============================================================
+# UI DASHBOARD
+# ============================================================
+
+def render_dashboard(user: dict, vinculo: dict):
+    data = load_data()
+    respostas = data["RESPOSTAS_CHECKLIST"]
+
+    unidade_id = vinculo["unidade_id"]
+    pessoa_id = user["pessoa_id"]
+    today = date_str()
+    response_map = latest_response_map(respostas, today)
+
+    st.markdown('<div class="liivv-card">', unsafe_allow_html=True)
+    st.subheader("Dashboard operacional")
+
+    st.info(f"Resumo do dia: {weekday_pt(now_sp().date())} | {today}")
+
+    checkpoint_options = [
+        ("CP0700", "07:00 - Abertura"),
+        ("CP1400", "14:00 - Meio do dia"),
+        ("CP2000", "20:00 - Fechamento"),
+    ]
+
+    rows = []
+
+    for checkpoint_id, checkpoint_label in checkpoint_options:
+        for tipo in ["geral", "posicao"]:
+            df_items = get_checklist_items(data, pessoa_id, unidade_id, checkpoint_id, tipo)
+            total = len(df_items)
+
+            ok = 0
+            nok = 0
+            na = 0
+            pending = 0
+
+            for _, item in df_items.iterrows():
+                item_id = str(item.get("item_padrao_id", ""))
+                key = item_key(unidade_id, checkpoint_id, tipo, item_id, pessoa_id)
+                status = effective_status(response_map.get(key))
+
+                if status == "OK":
+                    ok += 1
+                elif status == "NAO_OK":
+                    nok += 1
+                elif status == "NA":
+                    na += 1
+                else:
+                    pending += 1
+
+            pct = int(round((ok / total) * 100, 0)) if total else 0
+
+            rows.append(
+                {
+                    "checkpoint_id": checkpoint_id,
+                    "checkpoint": checkpoint_label,
+                    "tipo": "Geral" if tipo == "geral" else "Posição",
+                    "total": total,
+                    "ok": ok,
+                    "nok": nok,
+                    "na": na,
+                    "pending": pending,
+                    "pct": pct,
+                }
+            )
+
+    cols = st.columns(3)
+
+    for i, row in enumerate(rows):
+        bg = metric_palette(row["ok"], row["nok"], row["pending"], row["total"])
+        with cols[i % 3]:
+            st.markdown(
+                f"""
+                <div class="metric-card" style="background:{bg};">
+                    <div class="metric-title">{row['checkpoint']} | {row['tipo']}</div>
+                    <div class="metric-value">{row['pct']}%</div>
+                    <div class="metric-sub">
+                        OK {row['ok']}/{row['total']} | Não OK {row['nok']} | N/A {row['na']} | Pend. {row['pending']}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+# ============================================================
+# UI CHECKLIST
+# ============================================================
+
 def render_checklist(user: dict, vinculo: dict):
     st.markdown('<div class="liivv-card">', unsafe_allow_html=True)
     st.subheader("Checklist")
 
-    checkpoint_label = st.selectbox(
-        "Checkpoint",
-        [
-            "CP0700 | 07:00 - Abertura",
-            "CP1400 | 14:00 - Meio do dia",
-            "CP2000 | 20:00 - Fechamento",
-        ],
-    )
-    checkpoint_id = checkpoint_label.split("|")[0].strip()
-
-    tipo_label = st.radio(
-        "Tipo de checklist",
-        ["Por posição", "Geral da unidade"],
-        horizontal=True,
-    )
-    tipo = "posicao" if tipo_label == "Por posição" else "geral"
+    unidade_id = vinculo["unidade_id"]
+    pessoa_id = user["pessoa_id"]
+    today = date_str()
 
     data = load_data()
-    checklist = get_checklist(data, user["pessoa_id"], vinculo["unidade_id"], checkpoint_id, tipo)
+    respostas = data["RESPOSTAS_CHECKLIST"]
+    response_map = latest_response_map(respostas, today)
+
+    st.info(f"Checklist do dia: {weekday_pt(now_sp().date())} | {today}")
+
+    c1, c2 = st.columns([1, 1])
+
+    with c1:
+        checkpoint_label = st.selectbox(
+            "Checkpoint",
+            [
+                "CP0700 | 07:00 - Abertura",
+                "CP1400 | 14:00 - Meio do dia",
+                "CP2000 | 20:00 - Fechamento",
+            ],
+        )
+        checkpoint_id = checkpoint_label.split("|")[0].strip()
+
+    with c2:
+        tipo_label = st.selectbox(
+            "Tipo de checklist",
+            ["Por posição", "Geral da unidade"],
+        )
+        tipo = "posicao" if tipo_label == "Por posição" else "geral"
+
+    if st.button("Atualizar lista", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+
+    checklist = get_checklist_items(data, pessoa_id, unidade_id, checkpoint_id, tipo)
 
     if checklist.empty:
         st.info("Nenhum item encontrado para esta combinação.")
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    st.write(f"**Itens encontrados:** {len(checklist)}")
+    st.caption(
+        "Tudo começa pendente. Use OK, Não OK, N/A ou Desmarcar. "
+        "Observação e evidência são opcionais, mas recomendadas para Não OK."
+    )
 
     for _, item in checklist.iterrows():
         item_id = str(item.get("item_padrao_id", ""))
         item_nome = str(item.get("item", ""))
         detalhe = str(item.get("detalhe", ""))
+        servico = str(item.get("servico", ""))
+        area = str(item.get("area", ""))
         obrigatorio = str(item.get("obrigatorio", ""))
+        evidencia_requerida = str(item.get("evidencia_requerida", ""))
 
-        with st.expander(f"{item_nome}", expanded=False):
-            st.caption(detalhe)
-            st.caption(f"Obrigatório: {obrigatorio}")
+        key = item_key(unidade_id, checkpoint_id, tipo, item_id, pessoa_id)
+        latest = response_map.get(key)
+        status = effective_status(latest)
+        bg, fg, label = card_palette(status)
 
-            resposta = st.radio(
-                "Resposta",
-                ["OK", "NÃO OK", "NÃO APLICÁVEL"],
-                key=f"resp_{checkpoint_id}_{tipo}_{item_id}",
-                horizontal=True,
-            )
+        obs_key = f"obs_{unidade_id}_{checkpoint_id}_{tipo}_{item_id}"
+        evid_key = f"evid_{unidade_id}_{checkpoint_id}_{tipo}_{item_id}"
 
-            observacao = st.text_area(
-                "Observação",
-                key=f"obs_{checkpoint_id}_{tipo}_{item_id}",
-            )
+        st.markdown(
+            f"""
+            <div class="task-card" style="background:{bg};">
+                <div class="task-title">{item_nome}</div>
+                <div class="task-detail">{detalhe}</div>
+                <div class="task-meta">
+                    <b>Serviço/Área:</b> {servico or area or "-"} |
+                    <b>Obrigatório:</b> {obrigatorio or "-"} |
+                    <b>Evidência:</b> {evidencia_requerida or "-"}
+                </div>
+                <span class="pill" style="background:{fg}; color:white;">{label}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-            evidencia_url = st.text_input(
-                "URL de evidência, se houver",
-                key=f"evid_{checkpoint_id}_{tipo}_{item_id}",
-            )
+        with st.expander("Registrar detalhe / evidência", expanded=False):
+            observacao = st.text_area("Observação", key=obs_key)
+            evidencia_url = st.text_input("URL de evidência", key=evid_key)
 
-            if st.button("Enviar este item", key=f"btn_{checkpoint_id}_{tipo}_{item_id}", use_container_width=True):
+        b1, b2, b3, b4 = st.columns(4)
+
+        with b1:
+            if st.button("OK", key=f"ok_{key}", use_container_width=True):
                 try:
-                    result = register_checklist_response(
-                        unidade_id=vinculo["unidade_id"],
-                        pessoa_id=user["pessoa_id"],
+                    register_checklist_response(
+                        unidade_id=unidade_id,
+                        pessoa_id=pessoa_id,
                         checkpoint_id=checkpoint_id,
                         tipo_checklist=tipo,
                         item_id=item_id,
-                        resposta=resposta,
-                        observacao=observacao,
-                        evidencia_url=evidencia_url,
+                        resposta="OK",
+                        observacao=st.session_state.get(obs_key, ""),
+                        evidencia_url=st.session_state.get(evid_key, ""),
                     )
+                    st.success("Registrado como OK.")
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
 
-                    if result["alerta_gerado"] == "sim":
-                        st.warning(f"Resposta registrada com alerta. Status: {result['status']}")
-                    else:
-                        st.success(f"Resposta registrada. Status: {result['status']}")
+        with b2:
+            if st.button("Não OK", key=f"nok_{key}", use_container_width=True):
+                try:
+                    register_checklist_response(
+                        unidade_id=unidade_id,
+                        pessoa_id=pessoa_id,
+                        checkpoint_id=checkpoint_id,
+                        tipo_checklist=tipo,
+                        item_id=item_id,
+                        resposta="NÃO OK",
+                        observacao=st.session_state.get(obs_key, ""),
+                        evidencia_url=st.session_state.get(evid_key, ""),
+                    )
+                    st.warning("Registrado como Não OK.")
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
 
+        with b3:
+            if st.button("N/A", key=f"na_{key}", use_container_width=True):
+                try:
+                    register_checklist_response(
+                        unidade_id=unidade_id,
+                        pessoa_id=pessoa_id,
+                        checkpoint_id=checkpoint_id,
+                        tipo_checklist=tipo,
+                        item_id=item_id,
+                        resposta="NÃO APLICÁVEL",
+                        observacao=st.session_state.get(obs_key, ""),
+                        evidencia_url=st.session_state.get(evid_key, ""),
+                    )
+                    st.info("Registrado como não aplicável.")
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
+
+        with b4:
+            if st.button("Desmarcar", key=f"rst_{key}", use_container_width=True):
+                try:
+                    register_checklist_response(
+                        unidade_id=unidade_id,
+                        pessoa_id=pessoa_id,
+                        checkpoint_id=checkpoint_id,
+                        tipo_checklist=tipo,
+                        item_id=item_id,
+                        resposta="PENDENTE",
+                        observacao="Desmarcado pelo usuário",
+                        evidencia_url="",
+                    )
+                    st.info("Item desmarcado.")
+                    st.cache_data.clear()
+                    st.rerun()
                 except Exception as exc:
                     st.error(str(exc))
 
     st.markdown("</div>", unsafe_allow_html=True)
 
 
-def render_admin(user: dict):
+# ============================================================
+# UI ADMIN
+# ============================================================
+
+def render_admin(user: dict, vinculo: dict):
     if norm(user.get("perfil")) != "admin":
+        st.info("Área disponível apenas para perfil admin.")
         return
+
+    data = load_data()
+    unidade_id = vinculo["unidade_id"]
 
     st.markdown('<div class="liivv-card">', unsafe_allow_html=True)
     st.subheader("Painel admin")
 
-    data = load_data()
+    tab_alertas, tab_checkins, tab_respostas, tab_unidades = st.tabs(
+        ["Alertas", "Check-ins", "Respostas", "Unidades"]
+    )
 
-    tabs = st.tabs(["Alertas", "Check-ins", "Respostas", "Unidades"])
-
-    with tabs[0]:
-        alertas = data["ALERTAS"]
-        if alertas.empty:
+    with tab_alertas:
+        df = data["ALERTAS"]
+        if df.empty:
             st.info("Nenhum alerta registrado.")
         else:
-            st.dataframe(alertas.sort_values("timestamp", ascending=False), use_container_width=True)
+            if "unidade_id" in df.columns:
+                df = df[df["unidade_id"].astype(str).map(norm) == norm(unidade_id)]
+            st.dataframe(df.sort_values("timestamp", ascending=False), use_container_width=True)
 
-    with tabs[1]:
-        checkins = data["CHECKINS"]
-        if checkins.empty:
+    with tab_checkins:
+        df = data["CHECKINS"]
+        if df.empty:
             st.info("Nenhum check-in registrado.")
         else:
-            st.dataframe(checkins.sort_values("timestamp", ascending=False), use_container_width=True)
+            if "unidade_id" in df.columns:
+                df = df[df["unidade_id"].astype(str).map(norm) == norm(unidade_id)]
+            st.dataframe(df.sort_values("timestamp", ascending=False), use_container_width=True)
 
-    with tabs[2]:
-        respostas = data["RESPOSTAS_CHECKLIST"]
-        if respostas.empty:
+    with tab_respostas:
+        df = data["RESPOSTAS_CHECKLIST"]
+        if df.empty:
             st.info("Nenhuma resposta registrada.")
         else:
-            st.dataframe(respostas.sort_values("timestamp", ascending=False), use_container_width=True)
+            if "unidade_id" in df.columns:
+                df = df[df["unidade_id"].astype(str).map(norm) == norm(unidade_id)]
+            st.dataframe(df.sort_values("timestamp", ascending=False), use_container_width=True)
 
-    with tabs[3]:
-        unidades = data["UNIDADES"]
-        if unidades.empty:
+    with tab_unidades:
+        df = data["UNIDADES"]
+        if df.empty:
             st.info("Nenhuma unidade cadastrada.")
         else:
-            st.dataframe(unidades, use_container_width=True)
+            st.dataframe(df, use_container_width=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
 
+
+# ============================================================
+# MAIN APP
+# ============================================================
 
 def render_app():
     user = st.session_state["user"]
 
+    st.sidebar.markdown("## LIIVV")
     st.sidebar.write(f"**{user['nome']}**")
     st.sidebar.caption(f"Perfil: {user.get('perfil', '')}")
 
-    if st.sidebar.button("Sair"):
+    vinculo = select_vinculo(user)
+
+    st.sidebar.divider()
+    if st.sidebar.button("Sair", use_container_width=True):
         logout()
 
-    st.markdown('<div class="liivv-card">', unsafe_allow_html=True)
-    st.markdown('<div class="liivv-title">LIIVV Checklist</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-title">LIIVV Checklist</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="liivv-subtitle">Check-in e controle operacional por unidade.</div>',
+        f'<div class="subtitle">{vinculo["unidade_nome"]} | {vinculo["posicao_nome"]}</div>',
         unsafe_allow_html=True,
     )
-    vinculo = select_vinculo(user)
-    st.markdown("</div>", unsafe_allow_html=True)
 
-    tab_checkin, tab_checklist, tab_admin = st.tabs(["Check-in", "Checklist", "Admin"])
+    tab_dash, tab_checklist, tab_checkin, tab_admin = st.tabs(
+        ["Dashboard", "Checklist", "Check-in", "Admin"]
+    )
 
-    with tab_checkin:
-        render_checkin(user, vinculo)
+    with tab_dash:
+        render_dashboard(user, vinculo)
 
     with tab_checklist:
         render_checklist(user, vinculo)
 
+    with tab_checkin:
+        render_checkin(user, vinculo)
+
     with tab_admin:
-        render_admin(user)
+        render_admin(user, vinculo)
 
-
-# ============================================================
-# MAIN
-# ============================================================
 
 def main():
     if not st.session_state.get("logged"):
